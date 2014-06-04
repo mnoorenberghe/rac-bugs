@@ -11,10 +11,14 @@
 var gMetabugs = {
   // "alias": bug number,
   // TODO: update this object for your needs
-  "australis-meta": 870032,
-  //"australis-tabs": 732583,
+  "rAc": 1018291,
+  "rAc-backend": 1018295,
+  "rAc-backend-profiles": 1018304,
+  "rAc-desktop": 990367,
+  "rAc-android": 946022,
+  "rAc-one": 1018317,
 };
-var gDefaultMetabug = gMetabugs["australis-meta"]; // TODO: update this for your needs
+var gDefaultMetabug = gMetabugs["rAc"]; // TODO: update this for your needs
 
 var gColumns = {
   "id": "ID",
@@ -203,8 +207,8 @@ function getList(blocks, depth) {
 
   if (!Array.isArray(blocks) && !depth) { // Don't update the title for subqueries
     var heading = document.getElementById("title");
-    heading.textContent = (blocks ? blocks : "Dependency Bug List");
-    document.title = "Dependency Bug List" + (blocks ? " - " + blocks : "");
+    heading.textContent = (blocks ? blocks : "requestAutocomplete Bug List");
+    document.title = "requestAutocomplete Bug List" + (blocks ? " - " + blocks : "");
 
     var treelink = document.getElementById("treelink");
     if (gMetabugs[blocks] || !blocks) {
@@ -509,6 +513,8 @@ function start() {
   listbox.textContent = 'Metabugs: ';
   listbox.innerHTML += '<a href="./">ALL</a> ';
   Object.keys(gMetabugs).forEach(function(list){
+    if (gMetabugs[list] == gDefaultMetabug)
+      return;
     listbox.innerHTML += '<a href="?list=' + list + '">' + list + '</a> ';
   });
 
