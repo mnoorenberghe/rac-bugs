@@ -12,10 +12,11 @@ var gMetabugs = {
   // "alias": bug number,
   // TODO: update this object for your needs
   "rAc": 1018291,
-  "rAc-backend": 1018295,
+  "rAc-backend": 939351,
   "rAc-backend-profiles": 1018304,
   "rAc-desktop": 990367,
   "rAc-android": 946022,
+  "rAc-b2g": 964295,
   "rAc-one": 1018317,
 };
 var gDefaultMetabug = gMetabugs["rAc"]; // TODO: update this for your needs
