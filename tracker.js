@@ -40,7 +40,7 @@ var gColumns = {
 var virtualColumns = ["milestone", "points"];
 
 // Max dependency depth
-var MAX_DEPTH = 4;
+var MAX_DEPTH = 6;
 var BUG_CHUNK_SIZE = 100;
 
 /**
