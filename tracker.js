@@ -515,7 +515,7 @@ function start() {
   listbox.innerHTML += '<a href="./">ALL</a> ';
   Object.keys(gMetabugs).forEach(function(list){
     // TODO: don't hard-code the product. Unfortunately the blocked parameter gets lost without a product though :(
-    fileBugList.innerHTML += '<li><a href="https://bugzilla.mozilla.org/enter_bug.cgi?product=Firefox&blocked=' + gMetabugs[list] + '">' + list + '</a></li>';
+    fileBugList.innerHTML += '<li><a href="https://bugzilla.mozilla.org/enter_bug.cgi?product=Toolkit&component=Form%20Manager&blocked=' + gMetabugs[list] + '">' + list + '</a></li>';
     if (gMetabugs[list] == gDefaultMetabug)
       return;
     listbox.innerHTML += '<a href="?list=' + list + '">' + list + '</a> ';
