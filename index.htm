@@ -167,19 +167,21 @@ tr:hover {
     </ul>
   </div>
   <label>Filter: <input type="search" id="whiteboardFilter" placeholder="whiteboard &amp; keywords" size="20"/></label>
+  <label>Max. Depth: <input type="number" id="maxDepth" size="1" min="0" max="10" style="max-width: 4ch" required="required" value="4"/></label>
   <label><input type="checkbox" id="showMeta" value="1" checked="checked" />Meta</label>
   <label><input type="checkbox" id="showMMinus" value="1" />M-/P-</label>
   <select id="showResolved">
     <option value="">Resolved and unresolved</option>
-    <option value="0">Only unresolved</option>
+    <option value="0" selected="selected">Only unresolved</option>
     <option value="1">Only resolved</option>
   </select>
   <select id="productChooser">
-    <option value="">All products</option>
+    <option value="" selected="selected">All products</option>
     <!-- TODO: populate from bug list -->
     <option>Add-on SDK</option>
     <option>Core</option>
     <option>Firefox</option>
+    <option>Loop</option>
     <option>mozilla.org</option>
     <option>Release Engineering</option>
     <option>Testing</option>
@@ -208,7 +210,7 @@ tr:hover {
 
 <div id="summary">
   <span style="float:right">
-    <label><input type="checkbox" id="showFlags" value="1" checked="checked" />Show bug and attachment flags (slower)</label>
+    <label><input type="checkbox" id="showFlags" value="1" />Show bug and attachment flags (slower)</label>
     <a href="https://github.com/mnoorenberghe/rac-bugs" target="_blank">Fork me on Github</a>
   </span>
 </div>
