@@ -216,8 +216,15 @@ function getList(blocks, depth) {
     Object.keys(gMetabugs).forEach(function(list) {
       blocksParams += "&blocks=" + gMetabugs[list];
       });*/
-    blocksParams += "&blocks=" + gDefaultMetabug;
-    metaBug = gDefaultMetabug;
+    if (gDefaultMetabug) {
+      blocksParams += "&blocks=" + gDefaultMetabug;
+      metaBug = gDefaultMetabug;
+    } else {
+      setStatus("No list or default meta bug specified.<br/>" +
+                "<form onsubmit='javascript:'><input type=number size=8 placeholder=Bug style='-moz-appearance:textfield' /> " +
+                "<button onclick='gUrlParams.list=this.previousElementSibling.value;filterChanged(event);'>Go</button></form>");
+      return;
+    }
   } else if (Array.isArray(blocks)) {
     blocksParams += "&id=" + blocks.join(",");
   } else if (!(blocks in gMetabugs)) {
@@ -231,7 +238,15 @@ function getList(blocks, depth) {
 
   if (!Array.isArray(blocks) && !depth) { // Don't update the title for subqueries
     var heading = document.getElementById("title");
-    heading.textContent = (blocks ? blocks : "requestAutocomplete Bug List");
+    if (blocks) {
+      if (blocks in gMetabugs) {
+        heading.textContent = blocks;
+      } else {
+        heading.textContent = "Bug " + blocks;
+      }
+    } else {
+      heading.textContent = "requestAutocomplete Bug List";
+    }
     document.title = "requestAutocomplete Bug List" + (blocks ? " - " + blocks : "");
 
     var treelink = document.getElementById("treelink");
@@ -256,7 +271,7 @@ function getList(blocks, depth) {
 
   var bzColumns = Object.keys(gColumns).filter(function(val){ return virtualColumns.indexOf(val) === -1; }); // milestone is a virtual column.
   //console.log(bzColumns);
-  var apiURL = "https://api-dev.bugzilla.mozilla.org/latest/bug" +
+  var apiURL = "https://bugzilla.mozilla.org/bzapi/bug" +
       "?" + blocksParams.replace(/^&/, "") +
     "&include_fields=depends_on," + bzColumns.join(",");
 
@@ -281,13 +296,13 @@ function getList(blocks, depth) {
     gHTTPRequest = null;
     gHTTPRequestsInProgress--;
     if (!gHTTPRequestsInProgress) {
+      setStatus("");
         // clear out all deps. to fetch at all depths
       for (var d = 0; d < gDependenciesToFetch.length; d++) {
         while (gDependenciesToFetch[d].length) {
           getDependencySubset(d);
         }
       }
-      setStatus("");
       printList(true);
     }
   };
@@ -488,6 +503,9 @@ function printList(unthrottled) {
             return p1;
           });
           col.textContent = wb;
+
+          // Do this transform on the HTML so HTML can be added and so HTML is already escaped.
+          col.innerHTML = col.innerHTML.replace(/\[blocked[^\]]*\]/i, "<span class=blocked>$&</span>");
         }
       } else if (column == "milestone") {
         col.textContent =  bug[column] || "--";
