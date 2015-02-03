@@ -25,6 +25,7 @@ var gColumns = {
   "id": "ID",
   "status": "Status",
   "resolution": "",
+  "cf_last_resolved": "Last Resolved",
   //"creator": "Reporter",
   "assigned_to": "Assignee",
   "product": "Prod.",
@@ -60,6 +61,8 @@ var gHasFlags = false;
 var gLastPrintTime = 0;
 var gVisibleReporters = {};
 var gDependenciesToFetch = [];
+// Hack to disable localStorage saving since it confuses people especially when shared across multiple dashboards on the same domain.
+var gStorage = {};// window.localStorage
 
 function getDependencySubset(depth) {
   var totalDepsToFetch = gDependenciesToFetch.reduce(function(a, b) {
@@ -146,12 +149,23 @@ function buildURL() {
 
     url += (url ? "&" : "?") + paramName + "=" + encodeURIComponent(filterVal);
   });
+  ["sortColumn", "sortDirection"].forEach(function(paramName) {
+    if (!(paramName in gStorage))
+      return;
+
+    var filterVal = gStorage[paramName];
+    if (filterVal === null || filterVal === NaN)
+      return;
+
+    url += (url ? "&" : "?") + paramName + "=" + encodeURIComponent(filterVal);
+  });
   // if we only return an empty string, then pushState doesn't work
   return url || "?";
 }
 
 function filterChanged(evt) {
   console.log("filterChanged", evt);
+  var requireNewFetch = false;
   var requireNewLoad = false;
 
   if (evt.target == gFilterEls.maxdepth) {
@@ -159,22 +173,26 @@ function filterChanged(evt) {
   }
 
   var showResolved = parseInt(getFilterValue(gFilterEls.resolved), 2);
-  window.localStorage.showResolved = showResolved;
+  gStorage.showResolved = showResolved;
+  document.getElementById("list").dataset.showResolved = showResolved;
 
   var metaFilter = document.getElementById("showMeta");
-  window.localStorage.showMeta = getFilterValue(metaFilter);
+  gStorage.showMeta = getFilterValue(metaFilter);
 
   var mMinusFilter = document.getElementById("showMMinus");
-  window.localStorage.showMMinus = getFilterValue(mMinusFilter);
+  gStorage.showMMinus = getFilterValue(mMinusFilter);
+
+  var assigneeFilter = document.getElementById("assigneeFilter");
+  gStorage.assigneeFilter = getFilterValue(assigneeFilter);
 
   var flagFilter = document.getElementById("showFlags");
-  window.localStorage.showFlags = getFilterValue(flagFilter);
+  gStorage.showFlags = getFilterValue(flagFilter);
   if (!gHasFlags && gFilterEls.flags.checked) {
-    requireNewLoad = true;
+    requireNewFetch = true;
   }
 
-  window.localStorage.product = getFilterValue(gFilterEls.product);
-  document.getElementById("list").dataset.product = window.localStorage.product;
+  gStorage.product = getFilterValue(gFilterEls.product);
+  document.getElementById("list").dataset.product = gStorage.product;
 
   if (gFilterEls.flags.checked) {
       gColumns["flags"] = "Flags";
@@ -186,10 +204,11 @@ function filterChanged(evt) {
 
   window.history.pushState(gUrlParams, "", buildURL());
 
-  if (requireNewLoad) {
-      // Can't start new unrelated requests there are others pending
-      if (gHTTPRequestsInProgress) {
+  if (requireNewFetch || requireNewLoad) {
+      // Can't start new unrelated requests when there are others pending
+      if (gHTTPRequestsInProgress || requireNewLoad) {
           window.location = buildURL();
+          return;
       } else {
           loadBugs();
       }
@@ -247,7 +266,7 @@ function getList(blocks, depth) {
     } else {
       heading.textContent = "requestAutocomplete Bug List";
     }
-    document.title = "requestAutocomplete Bug List" + (blocks ? " - " + blocks : "");
+    document.title = (blocks ? blocks + " - " : "") + "rAc Bug List";
 
     var treelink = document.getElementById("treelink");
     if (metaBug) {
@@ -318,7 +337,7 @@ function getList(blocks, depth) {
   gHTTPRequestsInProgress++;
 }
 
-function flagText(flag, html = false) {
+function flagText(flag, html) {
   var text = flag.name + flag.status + (flag.requestee ? "(" + shortenUsername(flag.requestee.name) + ")" : "");
   if (html && flag.status == "?") {
     var span = document.createElement("span");
@@ -359,9 +378,10 @@ function printList(unthrottled) {
     setTimeout(function() {
       var sortedColumn = thead.querySelector(".sorttable_sorted, .sorttable_sorted_reverse");
       gSortColumn = sortedColumn.dataset.column;
-      window.localStorage.sortColumn = gSortColumn;
+      gStorage.sortColumn = gSortColumn;
       gSortDirection = sortedColumn.classList.contains("sorttable_sorted_reverse") ? "desc" : "asc";
-      window.localStorage.sortDirection = gSortDirection;
+      gStorage.sortDirection = gSortDirection;
+      filterChanged(evt);
     }, 1000);
   });
   table.insertBefore(thead, table.tBodies[0]);
@@ -380,6 +400,7 @@ function printList(unthrottled) {
   whiteboardFilter = whiteboardFilter.replace(/^\[m/i, "[Australis:M");
   whiteboardFilter = whiteboardFilter.replace(/^\[p/i, "[Australis:P");
 
+  var assigneeFilter = getFilterValue(gFilterEls.assignee);
   var resolvedFilter = getFilterValue(gFilterEls.resolved);
   var productFilter = getFilterValue(gFilterEls.product);
   var metaFilter = getFilterValue(gFilterEls.meta);
@@ -391,12 +412,25 @@ function printList(unthrottled) {
     tr.id = bug.id;
     tr.classList.add(bug.status);
     // Marked bugs in project branches as fixed e.g. [fixed-in-ux] or [fixed in jamun]
-    if (bug.whiteboard && bug.whiteboard.contains("[fixed")) {
+    if (bug.whiteboard && bug.whiteboard.indexOf("[fixed") !== -1) {
       tr.classList.add("RESOLVED");
     }
 
     if (resolvedFilter !== "" && (tr.classList.contains("RESOLVED") || tr.classList.contains("VERIFIED")) != resolvedFilter) {
       return;
+    }
+
+    if (assigneeFilter !== "") {
+      if (assigneeFilter == "unassigned") {
+        if (!bug.assigned_to.name.startsWith("nobody"))
+          return;
+      } else if (assigneeFilter == "assigned") {
+        if (bug.assigned_to.name.startsWith("nobody"))
+          return;
+      } else {
+        if (shortenUsername(bug.assigned_to.name).toLowerCase() != assigneeFilter.toLowerCase())
+          return;
+      }
     }
 
     if ((productFilter && bug.product != productFilter) || bug.product == "Thunderbird" || bug.product == "Seamonkey") {
@@ -407,12 +441,12 @@ function printList(unthrottled) {
       return;
     }
 
-    if (mMinusFilter === "0" && (bug.whiteboard && (bug.whiteboard.toLowerCase().contains(":m-]") || bug.whiteboard.toLowerCase().contains(":p-]")))) {
+    if (mMinusFilter === "0" && (bug.whiteboard && (bug.whiteboard.toLowerCase().indexOf(":m-]") !== -1 || bug.whiteboard.toLowerCase().indexOf(":p-]") !== -1))) {
       return;
     }
     var whiteboardFilterLower = whiteboardFilter.toLowerCase();
-    if (whiteboardFilter && (!(bug.whiteboard && bug.whiteboard.toLowerCase().contains(whiteboardFilterLower)) &&
-                             !(bug.keywords && bug.keywords.join(" ").toLowerCase().contains(whiteboardFilterLower)))
+    if (whiteboardFilter && (!(bug.whiteboard && bug.whiteboard.toLowerCase().indexOf(whiteboardFilterLower) !== -1) &&
+                             !(bug.keywords && bug.keywords.join(" ").toLowerCase().indexOf(whiteboardFilterLower) !== -1))
         ) {
       return;
     }
@@ -433,6 +467,10 @@ function printList(unthrottled) {
       if (Array.isArray(bug[column])) { // Arrays
         if (column == "flags") {
           bug[column].forEach(function(flag) {
+            // Ignore some old bug flags that are no longer relevant
+            if (flag.name.startsWith("blocking-aviary") || flag.name.endsWith("1.9") || flag.name.endsWith("firefox2")) {
+              return;
+            }
             col.innerHTML += flagText(flag, true) + " ";
           });
         } else if (column == "keywords") {
@@ -460,7 +498,14 @@ function printList(unthrottled) {
           col.textContent = "ARRAY";
         }
       } else if (typeof(bug[column]) == "object") { // Objects
-        col.textContent =  (bug[column].name ? shortenUsername(bug[column].name) : '');
+        if (bug[column].name) { // e.g. User object
+          var shortName = shortenUsername(bug[column].name);
+          col.setAttribute("sorttable_customkey", shortName.toLowerCase());
+          col.textContent = shortName;
+        } else {
+          col.textContent = '';
+        }
+
         col.dataset[column] = col.textContent;
       } else if (column == "id" || column == "summary") {
         var a = document.createElement("a");
@@ -558,16 +603,25 @@ function parseQueryParams() {
 
 function loadFilterValues(state) {
   console.log("loadFilterValues", state);
-  gFilterEls.resolved.value = ("resolved" in state ? state.resolved : window.localStorage.showResolved);
-  gFilterEls.product.value = ("product" in state ? state.product : window.localStorage.product);
+  var assignee = ("assignee" in state ? state.assignee : gStorage.assigneeFilter);
+  gFilterEls.assignee.value = assignee;
+  if (assignee && gFilterEls.assignee.value != assignee) {
+    // We set the value but it doesn't match. This means we need to add an option.
+    var option = document.createElement("option");
+    option.value = option.textContent = assignee;
+    gFilterEls.assignee.options.add(option);
+    gFilterEls.assignee.value = assignee;
+  }
+  gFilterEls.resolved.value = ("resolved" in state ? state.resolved : gStorage.showResolved);
+  gFilterEls.product.value = ("product" in state ? state.product : gStorage.product);
   document.getElementById("list").dataset.product = gFilterEls.product.value;
-  gFilterEls.meta.checked = ("meta" in state ? state.meta : window.localStorage.showMeta) !== "0";
-  gFilterEls.mMinus.checked = ("mMinus" in state ? state.mMinus : window.localStorage.showMMinus) === "1";
-  gFilterEls.flags.checked = ("flags" in state ? state.flags : window.localStorage.showFlags) === "1";
+  gFilterEls.meta.checked = ("meta" in state ? state.meta : gStorage.showMeta) !== "0";
+  gFilterEls.mMinus.checked = ("mMinus" in state ? state.mMinus : gStorage.showMMinus) === "1";
+  gFilterEls.flags.checked = ("flags" in state ? state.flags : gStorage.showFlags) === "1";
   gFilterEls.whiteboard.value = ("whiteboard" in state ? state.whiteboard : "");
   gFilterEls.maxdepth.value = ("maxdepth" in state ? state.maxdepth : MAX_DEPTH);
-  gSortColumn = ("sort" in state ? state.sort : window.localStorage.sortColumn);
-  gSortDirection = ("sortDir" in state ? state.sortDir : window.localStorage.sortDirection);
+  gSortColumn = ("sortColumn" in state ? state.sortColumn : gStorage.sortColumn);
+  gSortDirection = ("sortDirection" in state ? state.sortDirection : gStorage.sortDirection);
 }
 
 function start() {
@@ -587,18 +641,20 @@ function start() {
   gFilterEls.product = document.getElementById("productChooser");
   gFilterEls.meta = document.getElementById("showMeta");
   gFilterEls.mMinus = document.getElementById("showMMinus");
+  gFilterEls.assignee = document.getElementById("assigneeFilter");
   gFilterEls.flags = document.getElementById("showFlags");
   gFilterEls.maxdepth = document.getElementById("maxDepth");
   gFilterEls.whiteboard = document.getElementById("whiteboardFilter");
 
   parseQueryParams();
 
-  if (window.localStorage.showFlags === "1") {
+  if (gStorage.showFlags === "1") {
       gColumns["flags"] = "Flags";
       gColumns["attachments"] = "Attachment Flags";
   }
 
   // Add filter listeners after loading values
+  gFilterEls.assignee.addEventListener("change", filterChanged);
   gFilterEls.resolved.addEventListener("change", filterChanged);
   gFilterEls.product.addEventListener("change", filterChanged);
   gFilterEls.meta.addEventListener("change", filterChanged);
