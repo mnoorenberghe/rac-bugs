@@ -3,12 +3,11 @@
 <head>
 <meta charset="utf-8"/>
 <meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="cache-control" content="no-cache">
 <title>requestAutocomplete Bug List</title>
 <link rel="icon" href="https://mozorg.cdn.mozilla.net/media/img/firefox/favicon.ico?2013-08"/>
-<link rel="stylesheet" href="https://bugzilla.mozilla.org/skins/contrib/Mozilla/global.css?1386657099" />
 <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,600,700|Droid+Sans+Mono"/>
-
-<!--<link rel="stylesheet" href="global.css"/>-->
+<link rel="stylesheet" href="css/BMO.css"/>
 
 <style>
 html {
@@ -48,11 +47,18 @@ h1 {
   transition-property: top, visibility;
   transition-duration: 0.3s;
   transition-timing-function: ease;
+  /* Stay above #summary */
+  z-index: 1;
 }
 #status.hidden {
   top: -2em;
   visibility: hidden;
 }
+
+#form {
+  text-align: center;
+}
+
 #list:not([data-product=""]) .product {
   display: none;
 }
@@ -67,7 +73,6 @@ h1 {
 #list {
   border-collapse: collapse;
   counter-reset: bugs P1 P2 P3 P4 P5 PMinus POther;
-  visibility: hidden;
 }
 table.sortable thead {
   cursor: default;
@@ -79,7 +84,7 @@ table.sortable thead {
 tr:nth-child(even) {
   background: #CCC;
 }
-tr:hover {
+tbody > tr:hover {
   background: #AAA;
 }
 #list > tbody > tr {
@@ -160,13 +165,13 @@ tr:hover {
 }
 
 </style>
-<script src="tracker.js"></script>
+<script src="tracker.js?v=20160503.01"></script>
 <script src="sorttable.js"></script>
 </head>
 
 <body>
 <div id="tools">
-  <div id="file" class="popupmenu">
+  <div id="file" class="popupmenu" style="display: none">
     <label>File ▾</label>
     <ul>
     </ul>
@@ -204,7 +209,15 @@ tr:hover {
 <h1><a id="title" target="_blank">requestAutocomplete Bug List</a>
   <span id="treelink" style="display: none">(<a target="_blank">tree</a>)</span>
 </h1>
-<div id="metabugs"></div>
+<div id="metabugs" hidden></div>
+
+<form id="form" hidden="true" onsubmit="gUrlParams.list=this.list.value;filterChanged(event);this.hidden=true;">
+  <p>Specify a bug to list the dependencies of:</p>
+  <p>
+    <input name="list" size="18" placeholder="bug number or alias" autofocus />
+    <button>Fetch dependencies</button>
+  </p>
+</form>
 
 <table id="list" class="sortable">
   <thead>
@@ -220,7 +233,7 @@ tr:hover {
 
 <div id="summary">
   <span style="float:right">
-    <label><input type="checkbox" id="showFlags" value="1" />Show bug and attachment flags (slower)</label>
+    <label id="showFlagsLabel"><input type="checkbox" id="showFlags" value="1" />Show bug and attachment flags (slower)</label>
     <a href="https://github.com/mnoorenberghe/rac-bugs" target="_blank">Fork me on Github</a>
   </span>
 </div>

@@ -32,26 +32,28 @@ var gColumns = {
   "component": "Comp.",
   "summary": "Summary",
   "whiteboard": "Whiteboard",
-  "cf_fx_points": "Points",
+  //"cf_fx_points": "Points",
   "cf_fx_iteration": "Iter.",
   "priority": "Pri.",
   //"milestone": "M?",
   "keywords": "Keywords",
 };
 
-var virtualColumns = ["milestone"];
 
-// Max dependency depth
-var MAX_DEPTH = 6;
-var BUG_CHUNK_SIZE = 100;
+const BUG_CHUNK_SIZE = 100;
+const BUGZILLA_ORIGIN = "https://bugzilla.mozilla.org";
+/**
+ * Max dependency depth
+ */
+const DEFAULT_MAX_DEPTH = 4;
+const VIRTUAL_COLUMNS = ["milestone"];
 
 /**
  * State variables
  */
 
 var gBugs = {};
-var gBugsAtMaxDepth = {};
-var gVisibleBugs = {};
+var gBugsAtMaxDepth = {}; // For debugging only
 var gHTTPRequestsInProgress = 0;
 var gUrlParams = {};
 var gFilterEls = {};
@@ -59,38 +61,109 @@ var gSortColumn = null;
 var gSortDirection = null;
 var gHasFlags = false;
 var gLastPrintTime = 0;
-var gVisibleReporters = {};
+/**
+ * Array of depths containing bugs still to fetch which were found at that depth.
+ * i.e. dependencies of the root would appear in the array at index 0.
+ */
 var gDependenciesToFetch = [];
-// Hack to disable localStorage saving since it confuses people especially when shared across multiple dashboards on the same domain.
-var gStorage = {};// window.localStorage
 
+
+/**
+ * Deals with batching of bug requests by depth in order to reduce the number of requests to
+ * Bugzilla while also not creating query strings which are too long.
+ *
+ * Instead of making three requests for two bugs each at depth N, make one request for all six bugs.
+ * Instead of making one request for 200 bugs which may exceed the query string limit, split into
+ * chunks of size BUG_CHUNK_SIZE.
+ *
+ * @param {Number} depth - depth to fetch a batch of bugs from
+ */
 function getDependencySubset(depth) {
   var totalDepsToFetch = gDependenciesToFetch.reduce(function(a, b) {
     return a + b.length;
   }, 0);
   var subset = gDependenciesToFetch[depth].splice(0, BUG_CHUNK_SIZE);
-  setStatus("Fetching " + subset.length + "/" + totalDepsToFetch + " remaining dependencies… <progress />");
-  getList(subset, depth + 1);
+  setStatus(totalDepsToFetch + " dependencies queued to fetch… <progress />");
+  fetchBugs(subset, depth + 1);
 }
 
-function handleMetabugs(depth, response) {
+/**
+ * Note: One limitation is that the max depth will affect whether additional
+ * paths from the root are found.
+ *
+ * @param {Object} bug
+ * @param {Number} [depth = undefined] - the depth this bug was first found at
+ *                 or undefined if this bug wasn't just found.
+ */
+function hasRootPathWithoutMinus(bug, depth) {
+  // If the bug itself is minused, no need to check it's ancestors.
+  if (isBugMinused(bug)) {
+    return false;
+  }
+
+  // Handle bugs with existing paths when we don't know they depth later.
+  if (bug._rootPathWithoutMinus === true) {
+    return true;
+  }
+
+  // Since the root bug isn't in gBugs we need this special case so children of
+  // the root return true if they themselves aren't minused.
+  if (depth === 1) {
+    return true;
+  }
+
+  // Check if we found any of its parents in the tree already and it had a path
+  // to the root without a minus. Note that we might not have fetched some of
+  // the parents yet so this answer can change when we see the same bug later.
+  return bug.blocks.some(function(blocksId) {
+    return blocksId in gBugs && gBugs[blocksId]._rootPathWithoutMinus === true;
+  });
+}
+
+/**
+ * @param {Number} depth - Depth of the returned bugs. 0 = root bug only, 1 = dependencies of the root, etc.
+ * @param {String} response - HTTP response string from the XHR.
+ */
+function handleBugsResponse(depth, response) {
   var json = JSON.parse(response);
   var bugs = json.bugs;
-
+  //console.info("response:", depth, bugs);
   for (var i = 0; i < bugs.length; i++) {
-    // First occurrence at MAX_DEPTH
-    if (depth == parseInt(gFilterEls.maxdepth.value) - 1 && !(bugs[i].id in gBugs)) {
-        gBugsAtMaxDepth[bugs[i].id] = bugs[i];
+    // First occurrence at the max depth
+    if (depth == parseInt(gFilterEls.maxdepth.value) && !(bugs[i].id in gBugs)) {
+      gBugsAtMaxDepth[bugs[i].id] = bugs[i];
     }
-    gBugs[bugs[i].id] = bugs[i];
+
+    // Add the found bug to the gBugs array.
+    // Don't include the root bug in the array.
+    if (depth > 0) {
+      gBugs[bugs[i].id] = bugs[i];
+      gBugs[bugs[i].id]._rootPathWithoutMinus = hasRootPathWithoutMinus(bugs[i], depth);
+    }
+
+    // Add any depedencies to the array of dependencies to fetch for the specified
+    // depth unless we've already fetched that bug through a different path.
     if ("depends_on" in bugs[i] && Array.isArray(bugs[i].depends_on)) {
-        gDependenciesToFetch[depth] = gDependenciesToFetch[depth].concat(bugs[i].depends_on.filter(function removeExisting(bugId) {
-                    return !(bugId in gBugs);
-                }));
-        while (gDependenciesToFetch[depth].length >= BUG_CHUNK_SIZE) {
-          getDependencySubset(depth);
+      for (var j = 0; j < bugs[i].depends_on.length; j++) {
+        var depBugId = bugs[i].depends_on[j];
+        if (depBugId in gBugs) {
+          // We don't know the depth since we don't know at what depth it was found originally.
+          var before = gBugs[depBugId]._rootPathWithoutMinus;
+          gBugs[depBugId]._rootPathWithoutMinus = hasRootPathWithoutMinus(gBugs[depBugId], undefined);
+          var after = gBugs[depBugId]._rootPathWithoutMinus;
+          if (!before && after) {
+            console.info("!before && after", depBugId); // TODO: test that this happens
+          }
+        } else {
+          gDependenciesToFetch[depth].push(depBugId);
         }
+      }
     }
+  }
+
+  // Kick off fetches if we're already over the chunk size for this depth.
+  while (gDependenciesToFetch[depth].length >= BUG_CHUNK_SIZE) {
+    getDependencySubset(depth);
   }
 
   window.setTimeout(printList, 0);
@@ -141,7 +214,7 @@ function buildURL() {
     if (paramName == "meta" && filterVal == "1")
       return;
 
-    if (paramName == "maxdepth" && filterVal == MAX_DEPTH)
+    if (paramName == "maxdepth" && filterVal == DEFAULT_MAX_DEPTH)
       return;
 
     if (paramName == "resolved" && filterVal === "0")
@@ -149,15 +222,12 @@ function buildURL() {
 
     url += (url ? "&" : "?") + paramName + "=" + encodeURIComponent(filterVal);
   });
-  ["sortColumn", "sortDirection"].forEach(function(paramName) {
-    if (!(paramName in gStorage))
+  ["Column", "Direction"].forEach(function(paramName) {
+    var filterVal = window["gSort" + paramName];
+    if (!filterVal)
       return;
 
-    var filterVal = gStorage[paramName];
-    if (filterVal === null || filterVal === NaN)
-      return;
-
-    url += (url ? "&" : "?") + paramName + "=" + encodeURIComponent(filterVal);
+    url += (url ? "&" : "?") + "sort" + paramName + "=" + encodeURIComponent(filterVal);
   });
   // if we only return an empty string, then pushState doesn't work
   return url || "?";
@@ -178,137 +248,95 @@ function filterChanged(evt) {
   }
 
   var showResolved = parseInt(getFilterValue(gFilterEls.resolved), 2);
-  gStorage.showResolved = showResolved;
   document.getElementById("list").dataset.showResolved = showResolved;
 
   var metaFilter = document.getElementById("showMeta");
-  gStorage.showMeta = getFilterValue(metaFilter);
-
   var mMinusFilter = document.getElementById("showMMinus");
-  gStorage.showMMinus = getFilterValue(mMinusFilter);
-
   var assigneeFilter = document.getElementById("assigneeFilter");
-  gStorage.assigneeFilter = getFilterValue(assigneeFilter);
-
   var flagFilter = document.getElementById("showFlags");
-  gStorage.showFlags = getFilterValue(flagFilter);
+
   if (!gHasFlags && gFilterEls.flags.checked) {
     requireNewFetch = true;
   }
 
-  gStorage.product = getFilterValue(gFilterEls.product);
-  document.getElementById("list").dataset.product = gStorage.product;
+  document.getElementById("list").dataset.product = getFilterValue(gFilterEls.product);
 
   if (gFilterEls.flags.checked) {
-      gColumns["flags"] = "Flags";
-      gColumns["attachments"] = "Attachment Flags";
+    gColumns["flags"] = "Flags";
+    gColumns["attachments"] = "Attachment Flags";
   } else {
-      delete gColumns["flags"];
-      delete gColumns["attachments"];
+    delete gColumns["flags"];
+    delete gColumns["attachments"];
   }
 
   window.history.pushState(gUrlParams, "", buildURL());
 
   if (requireNewFetch || requireNewLoad) {
-      // Can't start new unrelated requests when there are others pending
-      if (gHTTPRequestsInProgress || requireNewLoad) {
-          window.location = buildURL();
-          evt.preventDefault();
-          return;
-      } else {
-          loadBugs();
-      }
+    // Can't start new unrelated requests when there are others pending
+    if (gHTTPRequestsInProgress || requireNewLoad) {
+      window.location = buildURL();
+      evt.preventDefault();
+      return;
+    } else {
+      getBugsUnderRoot();
+    }
   }
 
   printList(true);
 }
 
-function getList(blocks, depth) {
-  //  console.log("getList:", depth, blocks);
-  if (depth >= parseInt(gFilterEls.maxdepth.value)) {
-    console.log("MAX_DEPTH reached: ", depth);
+/**
+ * Fetch bugs that are descendants of the root bug at the specified depth.
+ * If `depth` is greater than the max depth, no bugs will be fetched.
+ *
+ * If `blocks` is an array, fetch the specified bugs.
+ * Otherwise, fetch bugs that block the bug number/alias (an actual alias on Bugzilla).
+ *
+ * @param {Number|Number[]|String} blocks - bug number, bugzilla alias, or array of bug numbers
+ * @param {Number} depth - number of levels below the root bug that we are fetching
+ */
+function fetchBugs(blocks, depth) {
+  console.log("fetchBugs:", depth, blocks);
+  if (depth > parseInt(gFilterEls.maxdepth.value)) {
+    console.log("max. depth reached: ", depth);
     if (!gHTTPRequestsInProgress) {
       setStatus("");
     }
     return;
   }
 
-  var metaBug = null;
   var blocksParams = "";
-  if (!blocks) {
-      /*
-      // used to use the list of meta bugs but now we just do a true tree from the top so the dep. tree numbers match BZ
-    Object.keys(gMetabugs).forEach(function(list) {
-      blocksParams += "&blocks=" + gMetabugs[list];
-      });*/
-    if (gDefaultMetabug) {
-      blocksParams += "&blocks=" + gDefaultMetabug;
-      metaBug = gDefaultMetabug;
-    } else {
-      setStatus("No list or default meta bug specified.<br/>" +
-                "<form onsubmit='gUrlParams.list=this.firstElementChild.value;filterChanged(event);'>" +
-                "<input type=number size=8 placeholder=Bug style='-moz-appearance:textfield' /> " +
-                "<button>Go</button></form>");
-      return;
-    }
-  } else if (Array.isArray(blocks)) {
+  if (Array.isArray(blocks)) {
     blocksParams += "&id=" + blocks.join(",");
-  } else if (!(blocks in gMetabugs)) {
-    var bugNum = parseInt(blocks, 10);
-    blocksParams += "&blocks=" + bugNum;
-    metaBug = bugNum;
   } else {
-    blocksParams = "blocks=" + gMetabugs[blocks];
-    metaBug = gMetabugs[blocks];
-  }
-
-  if (!Array.isArray(blocks) && !depth) { // Don't update the title for subqueries
-    var heading = document.getElementById("title");
-    if (blocks) {
-      if (blocks in gMetabugs) {
-        heading.textContent = blocks;
-      } else {
-        heading.textContent = "Bug " + blocks;
-      }
+    var bugNum = Number(blocks);
+    if (bugNum) {
+      blocksParams += "&id=" + encodeURIComponent(blocks);
     } else {
-      heading.textContent = "requestAutocomplete Bug List";
-    }
-    document.title = (blocks ? blocks + " - " : "") + "rAc Bug List";
-
-    var treelink = document.getElementById("treelink");
-    if (metaBug) {
-      heading.href = "https://bugzilla.mozilla.org/show_bug.cgi?id=" + metaBug;
-      treelink.firstElementChild.href = "https://bugzilla.mozilla.org/showdependencytree.cgi?id=" + metaBug + "&maxdepth=" + gFilterEls.maxdepth.value + "&hide_resolved=1";
-      treelink.style.display = "inline";
-    } else {
-      heading.removeAttribute("href");
-      treelink.firstElementChild.removeAttribute("href");
-      treelink.style.display = "none";
+      blocksParams += "&alias=" + encodeURIComponent(blocks);
     }
   }
 
   if (gFilterEls.flags.checked) {
-      gColumns["flags"] = "Flags";
-      gColumns["attachments"] = "Attachment Flags";
+    gColumns["flags"] = "Flags";
+    gColumns["attachments"] = "Attachment Flags";
   } else {
-      delete gColumns["flags"];
-      delete gColumns["attachments"];
+    delete gColumns["flags"];
+    delete gColumns["attachments"];
   }
 
-  var bzColumns = Object.keys(gColumns).filter(function(val){ return virtualColumns.indexOf(val) === -1; }); // milestone is a virtual column.
-  //console.log(bzColumns);
-  var apiURL = "https://bugzilla.mozilla.org/bzapi/bug" +
-      "?" + blocksParams.replace(/^&/, "") +
-    "&include_fields=depends_on," + bzColumns.join(",");
+  var bzColumns = Object.keys(gColumns).filter(function(val) { // gColumns without virtual columns (e.g. milestone)
+    return VIRTUAL_COLUMNS.indexOf(val) === -1;
+  });
+
+  var apiURL = BUGZILLA_ORIGIN + "/bzapi/bug" +
+        "?" + blocksParams.replace(/^&/, "") +
+        "&include_fields=depends_on,blocks," + bzColumns.join(",");
 
   var hasFlags = gFilterEls.flags.checked;
-  var gHTTPRequest = null;  // TODO
-  if (gHTTPRequest)
-    gHTTPRequest.abort();
-  gHTTPRequest = new XMLHttpRequest();
-  //var callback = function(resp) { handleMetabugs(depth, resp); };
-  var callback = handleMetabugs.bind(this, depth);
-  gHTTPRequest.onreadystatechange = function progressListener() {
+  var xhr = new XMLHttpRequest();
+  var callback = handleBugsResponse.bind(this, depth);
+  xhr.onreadystatechange = function progressListener() {
     if (this.readyState == 4) {
       if (this.status == 200) {
         gHasFlags = hasFlags;
@@ -318,12 +346,12 @@ function getList(blocks, depth) {
       }
     }
   };
-  gHTTPRequest.onloadend = function loadend() {
-    gHTTPRequest = null;
+  xhr.onloadend = function loadend() {
+    xhr = null;
     gHTTPRequestsInProgress--;
     if (!gHTTPRequestsInProgress) {
       setStatus("");
-        // clear out all deps. to fetch at all depths
+      // clear out all deps. to fetch at all depths
       for (var d = 0; d < gDependenciesToFetch.length; d++) {
         while (gDependenciesToFetch[d].length) {
           getDependencySubset(d);
@@ -332,16 +360,23 @@ function getList(blocks, depth) {
       printList(true);
     }
   };
-  gHTTPRequest.onerror = function xhr_error(evt) {
+  xhr.onerror = function xhr_error(evt) {
     setStatus("There was an error with a request: " + evt.target.statusText);
-    gHTTPRequest = null;
   };
 
-  gHTTPRequest.open("GET", apiURL, true);
-  gHTTPRequest.setRequestHeader('Accept',       'application/json');
-  gHTTPRequest.setRequestHeader('Content-Type', 'application/json');
-  gHTTPRequest.send();
+  xhr.open("GET", apiURL, true);
+  xhr.setRequestHeader('Accept',       'application/json');
+  xhr.setRequestHeader('Content-Type', 'application/json');
+  xhr.send();
   gHTTPRequestsInProgress++;
+}
+
+function isBugMinused(bug) {
+  if (!bug.whiteboard) {
+    return false;
+  }
+  return bug.whiteboard.toLowerCase().indexOf(":m-]") !== -1 ||
+         bug.whiteboard.toLowerCase().indexOf(":p-]") !== -1;
 }
 
 function flagText(flag, html) {
@@ -369,7 +404,6 @@ function printList(unthrottled) {
   gLastPrintTime = nowTime;
 
   var table = document.getElementById("list");
-  table.style.visibility = "";
   // Delete existing rows
   var rows = document.querySelectorAll("#list > tbody > tr");
   for (var i = 0; i < rows.length; i++) {
@@ -385,9 +419,7 @@ function printList(unthrottled) {
     setTimeout(function() {
       var sortedColumn = thead.querySelector(".sorttable_sorted, .sorttable_sorted_reverse");
       gSortColumn = sortedColumn.dataset.column;
-      gStorage.sortColumn = gSortColumn;
       gSortDirection = sortedColumn.classList.contains("sorttable_sorted_reverse") ? "desc" : "asc";
-      gStorage.sortDirection = gSortDirection;
       filterChanged(evt);
     }, 1000);
   });
@@ -403,10 +435,6 @@ function printList(unthrottled) {
   });
 
   var whiteboardFilter = getFilterValue(gFilterEls.whiteboard);
-  // support searching for milestones with the shortened displayed text of "[MX]"
-  whiteboardFilter = whiteboardFilter.replace(/^\[m/i, "[Australis:M");
-  whiteboardFilter = whiteboardFilter.replace(/^\[p/i, "[Australis:P");
-
   var assigneeFilter = getFilterValue(gFilterEls.assignee);
   var resolvedFilter = getFilterValue(gFilterEls.resolved);
   var productFilter = getFilterValue(gFilterEls.product);
@@ -448,24 +476,15 @@ function printList(unthrottled) {
       return;
     }
 
-    if (mMinusFilter === "0" && (bug.whiteboard && (bug.whiteboard.toLowerCase().indexOf(":m-]") !== -1 || bug.whiteboard.toLowerCase().indexOf(":p-]") !== -1))) {
+    if (mMinusFilter === "0" && !bug._rootPathWithoutMinus) {
       return;
     }
     var whiteboardFilterLower = whiteboardFilter.toLowerCase();
     if (whiteboardFilter && (!(bug.whiteboard && bug.whiteboard.toLowerCase().indexOf(whiteboardFilterLower) !== -1) &&
                              !(bug.keywords && bug.keywords.join(" ").toLowerCase().indexOf(whiteboardFilterLower) !== -1))
-        ) {
-      return;
-    }
-    if (bug["creator"]) {
-      if (!gVisibleReporters[bug["creator"].name]) {
-          gVisibleReporters[bug["creator"].name] = {};
-      }
-      gVisibleReporters[bug["creator"].name][bugId] = 1;
-    }
-
-    // Note that this doesn't get cleared so really means bugs visible based on initial filters. It's only used for gathering data in the console.
-    gVisibleBugs[bugId] = bug;
+       ) {
+         return;
+       }
 
     Object.keys(gColumns).forEach(function(column) {
       var col = document.createElement("td");
@@ -497,7 +516,7 @@ function printList(unthrottled) {
               return (!att.is_obsolete && att.is_patch);
             });
             if (currentPatches.length) {
-                col.textContent = "(none)";
+              col.textContent = "(none)";
             }
           }
         } else {
@@ -517,24 +536,23 @@ function printList(unthrottled) {
         col.dataset[column] = col.textContent;
       } else if (column == "id" || column == "summary") {
         var a = document.createElement("a");
-        a.href = "https://bugzilla.mozilla.org/show_bug.cgi?id=" + bug.id;
+        a.href = BUGZILLA_ORIGIN + "/show_bug.cgi?id=" + bug.id;
         a.textContent = bug[column];
         col.appendChild(a);
       } else if (column == "status" || column == "resolution") {
         if (typeof(bug[column]) !== "undefined")
           col.textContent = bug[column].substr(0, 4);
       } else if (column == "component") {
-          col.textContent =  bug[column].replace(/and Customization/, "& Cust.");
+        col.textContent =  bug[column].replace(/and Customization/, "& Cust.");
       } else if (column == "priority") { // Custom sort order for +/-
-          col.textContent =  bug[column];
-          // Comma character is between + and - in ASCII
-          col.setAttribute("sorttable_customkey", bug[column].replace(/^(P\d)$/, "$1,"));
+        col.textContent =  bug[column];
+        // Comma character is between + and - in ASCII
+        col.setAttribute("sorttable_customkey", bug[column].replace(/^(P\d)$/, "$1,"));
       } else if (column == "whiteboard") {
         if (bug[column]) {
-          var wb = bug[column].replace("[Australis:M", "[M");
-          wb = wb.replace("[Australis:P", "[P");
-          wb = wb.replace(/\[P[^\]]+\]/, function(match) {
-            bug["priority"] = match.slice(1, -1);
+          var wb = bug[column];
+          wb = wb.replace(/\[[^:\]]+:(P[^\]]+)\]/, function(match, priority) {
+            bug["priority"] = priority;
             return "";
           });
           wb = wb.replace(/\[M[^\]]+\]/, function(match) {
@@ -581,12 +599,12 @@ function printList(unthrottled) {
       }
     }
   }
-  table.style.visibility = "visible";
 }
 
 function setStatus(message) {
   var statusbox = document.getElementById("status");
   if (message) {
+    console.log("setStatus:", message);
     statusbox.innerHTML = message;
     statusbox.classList.remove("hidden");
   } else {
@@ -606,12 +624,11 @@ function parseQueryParams() {
   while ( (match = search.exec(query)) )
     gUrlParams[decode(match[1])] = decode(match[2]);
   loadFilterValues(gUrlParams);
-  printList(true);
 };
 
 function loadFilterValues(state) {
   console.log("loadFilterValues", state);
-  var assignee = ("assignee" in state ? state.assignee : gStorage.assigneeFilter);
+  var assignee = ("assignee" in state ? state.assignee : "");
   gFilterEls.assignee.value = assignee;
   if (assignee && gFilterEls.assignee.value != assignee) {
     // We set the value but it doesn't match. This means we need to add an option.
@@ -620,19 +637,26 @@ function loadFilterValues(state) {
     gFilterEls.assignee.options.add(option);
     gFilterEls.assignee.value = assignee;
   }
-  gFilterEls.resolved.value = ("resolved" in state ? state.resolved : gStorage.showResolved);
-  gFilterEls.product.value = ("product" in state ? state.product : gStorage.product);
+
+  gFilterEls.resolved.value = ("resolved" in state ? state.resolved : "0");
+  gFilterEls.product.value = ("product" in state ? state.product : "");
   document.getElementById("list").dataset.product = gFilterEls.product.value;
-  gFilterEls.meta.checked = ("meta" in state ? state.meta : gStorage.showMeta) !== "0";
-  gFilterEls.mMinus.checked = ("mMinus" in state ? state.mMinus : gStorage.showMMinus) === "1";
-  gFilterEls.flags.checked = ("flags" in state ? state.flags : gStorage.showFlags) === "1";
+  gFilterEls.meta.checked = ("meta" in state ? state.meta : "") !== "0";
+  gFilterEls.mMinus.checked = ("mMinus" in state ? state.mMinus : "") === "1";
+  gFilterEls.flags.checked = ("flags" in state ? state.flags : "") === "1";
   gFilterEls.whiteboard.value = ("whiteboard" in state ? state.whiteboard : "");
-  gFilterEls.maxdepth.value = ("maxdepth" in state ? state.maxdepth : MAX_DEPTH);
-  gSortColumn = ("sortColumn" in state ? state.sortColumn : gStorage.sortColumn);
-  gSortDirection = ("sortDirection" in state ? state.sortDirection : gStorage.sortDirection);
+  gFilterEls.maxdepth.value = ("maxdepth" in state ? state.maxdepth : DEFAULT_MAX_DEPTH);
+  gSortColumn = ("sortColumn" in state ? state.sortColumn : gSortColumn);
+  gSortDirection = ("sortDirection" in state ? state.sortDirection : gSortDirection);
 }
 
-function start() {
+/**
+ * This function gets called once upon DOMContentLoaded to setup static state and markup.
+ * The function then kicks up the initial request for bugs.
+ *
+ * Nothing directly in this function should depend on URL parameters.
+ */
+function init() {
   var fileBugList = document.querySelector("#file > ul");
   var listbox = document.getElementById("metabugs");
   listbox.textContent = 'Metabugs: ';
@@ -640,9 +664,11 @@ function start() {
   Object.keys(gMetabugs).forEach(function(list){
     // TODO: don't hard-code the product. Unfortunately the blocked parameter gets lost without a product though :(
     fileBugList.innerHTML += '<li><a href="https://bugzilla.mozilla.org/enter_bug.cgi?product=Toolkit&component=Form%20Manager&blocked=' + gMetabugs[list] + '">' + list + '</a></li>';
+    document.getElementById("file").style.display = "";
     if (gMetabugs[list] == gDefaultMetabug)
       return;
     listbox.innerHTML += '<a href="?list=' + list + '">' + list + '</a> ';
+    listbox.hidden = false;
   });
 
   gFilterEls.resolved = document.getElementById("showResolved");
@@ -656,9 +682,9 @@ function start() {
 
   parseQueryParams();
 
-  if (gStorage.showFlags === "1") {
-      gColumns["flags"] = "Flags";
-      gColumns["attachments"] = "Attachment Flags";
+  if (gFilterEls.flags.checked) {
+    gColumns["flags"] = "Flags";
+    gColumns["attachments"] = "Attachment Flags";
   }
 
   // Add filter listeners after loading values
@@ -671,17 +697,61 @@ function start() {
   gFilterEls.maxdepth.addEventListener("input", filterChanged);
   gFilterEls.whiteboard.addEventListener("input", filterChanged);
 
-  loadBugs();
+  // Print the headings to reduce jumping when the first printList happens later.
+  printList(true);
+
+  getBugsUnderRoot();
 }
 
-function loadBugs() {
-  setStatus("Loading bugs… <progress />");
-  gDependenciesToFetch = new Array(parseInt(gFilterEls.maxdepth.value));
+/**
+ * Prepare for loading the root bug (if specified) or prompt otherwise.
+ *
+ * This function can be called more than once on a page load
+ * e.g. if flag columns are requested after the page was fully loaded without flags.
+ */
+function getBugsUnderRoot() {
+  // Populate/clear gDependenciesToFetch for the appropriate number of levels.
+  gDependenciesToFetch = new Array(parseInt(gFilterEls.maxdepth.value) + 1);
   for (var d = 0; d < gDependenciesToFetch.length; d++) {
     gDependenciesToFetch[d] = [];
   }
-  getList(gUrlParams.list || window.location.hash.replace("#", ""), 0);
+
+  // This can be an alias known only to the dashboard in gMetabugs, not only a Bugzilla alias.
+  var rootBugOrAlias = gUrlParams.list || window.location.hash.replace("#", "") || gDefaultMetabug;
+
+  var heading = document.getElementById("title");
+  var treelink = document.getElementById("treelink");
+  if (!rootBugOrAlias) {
+    heading.removeAttribute("href");
+    treelink.firstElementChild.removeAttribute("href");
+    treelink.style.display = "none";
+
+    document.getElementById("form").hidden = false;
+    document.getElementById("list").hidden = true;
+    document.getElementById("tools").hidden = true;
+    document.getElementById("showFlagsLabel").hidden = true;
+    return;
+  }
+
+  // Update the heading and title for the specified root bug.
+  if (Number(rootBugOrAlias)) {
+    heading.textContent = "Bug " + rootBugOrAlias;
+  } else {
+    heading.textContent = rootBugOrAlias;
+  }
+  document.title = rootBugOrAlias + " - RAC Bug List";
+
+
+  // Lookup in gMetabugs in case we have an alias known only to the dashboard, not to bugzilla.
+  var bugzillaBugOrAlias = rootBugOrAlias in gMetabugs ? gMetabugs[rootBugOrAlias] : rootBugOrAlias;
+  heading.href = BUGZILLA_ORIGIN + "/show_bug.cgi?id=" + bugzillaBugOrAlias;
+  treelink.firstElementChild.href = BUGZILLA_ORIGIN + "/showdependencytree.cgi?id=" + bugzillaBugOrAlias +
+    "&maxdepth=" + gFilterEls.maxdepth.value + "&hide_resolved=1";
+  treelink.style.display = "inline";
+
+  setStatus("Loading bugs… <progress />");
+  fetchBugs(bugzillaBugOrAlias, 0);
 }
 
-document.addEventListener("DOMContentLoaded", start);
+document.addEventListener("DOMContentLoaded", init);
 window.onpopstate = parseQueryParams;
